@@ -1,0 +1,8 @@
+name: Sovak webform
+type: module
+description: Sovak webform
+core_version_requirement: ^8 || ^9 || ^10
+package: Custom
+
+dependencies:
+  - webform

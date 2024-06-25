@@ -1,0 +1,4 @@
+services:
+  sovak_webform.helper:
+    class: Drupal\sovak_webform\SovakWebformHelper
+    arguments: ['@database']

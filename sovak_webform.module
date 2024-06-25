@@ -1,0 +1,354 @@
+<?php
+
+/**
+ * @file
+ * Contains sovak_webform.module.
+ */
+
+use Drupal\node\Entity\Node;
+use Drupal\core\Render\Markup;
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\sovak_webform\SovakWebformHelper;
+
+/**
+ * Implements hook_preprocess_HOOK().
+ */
+function sovak_webform_preprocess_webform_email_message_html(&$variables) {
+  $webform_id = $variables['webform_submission']->getWebform()->id();
+
+  if ($webform_id == 'koupit_vice_publikaci' || $webform_id == 'koupit_publikaci') {
+    // Unserialize saved data and than create table and insert it on sovak
+    // webform.
+    // placeholder place to the sending message.
+    $unserialized_data = unserialize($variables['webform_submission']->getElementData('objednavky'));
+    $table = \Drupal::service('sovak_webform.helper')
+      ->createOrdersTable($unserialized_data);
+    $table = \Drupal::service('renderer')->render($table);
+    $data = str_replace("sovak_webform_placeholder", $table, $variables['message']['body']);
+
+    $variables['message']['body'] = Markup::create($data);
+  }
+
+  if ($webform_id == 'prihlasit_na_seminar' || $webform_id == 'prihlasit_na_konferenci') {
+    if (!$variables['webform_submission']->get('entity_id')->isEmpty()) {
+      $nid = $variables['webform_submission']->get('entity_id')->getValue()[0]['value'];
+      $submissions = \Drupal::service('sovak_webform.helper')
+        ->getWebformSubmissionsForId($webform_id, $nid);
+      $sub_count = count($submissions);
+      $data = str_replace("sovak_webform_placeholder_sub_count", $sub_count, $variables['message']['body']);
+
+      $variables['message']['body'] = Markup::create($data);
+
+    }
+
+  }
+}
+
+/**
+ * Implements hook_form_alter().
+ */
+function sovak_webform_form_alter(&$form, &$form_state, $form_id) {
+  $t = ' Kč';
+  if (strpos($form_id, 'webform_submission_prihlasit_na_seminar') !== FALSE && strpos($form_id, 'add_form') !== FALSE) {
+    if (isset($form['progress']['#current_page']) && $form['progress']['#current_page'] == 'webform_start') {
+      $form['elements']['typ_clenstvi']['#options']['radny_clen'] = $form['elements']['typ_clenstvi']['#options']['radny_clen'] . '  (' . $form['elements']['cena_radny']['#value'] . $t . ')';
+      $form['elements']['typ_clenstvi']['#options']['pridruzeny_clen'] = $form['elements']['typ_clenstvi']['#options']['pridruzeny_clen'] . '  (' . $form['elements']['cena_pridruzeny']['#value'] . $t . ')';
+      $form['elements']['typ_clenstvi']['#options']['Ostatni'] = $form['elements']['typ_clenstvi']['#options']['Ostatni'] . '  (' . $form['elements']['cena_ostatni']['#value'] . $t . ')';
+    }
+    array_unshift($form['actions']['submit']['#submit'], 'webform_submission_prihlasit_na_seminar_form_submit');
+  }
+  if (strpos($form_id, 'webform_submission_prihlasit_na_konferenci') !== FALSE && strpos($form_id, 'add_form') !== FALSE) {
+    array_unshift($form['actions']['submit']['#submit'], 'webform_submission_prihlasit_na_konferenci_form_submit');
+  }
+  if (strpos($form_id, 'webform_submission_koupit_vice_publikaci') !== FALSE && strpos($form_id, 'add_form') !== FALSE) {
+
+    $webform_id = $form['#webform_id'];
+    $publications = \Drupal::service('sovak_webform.helper')
+      ->getPublications();
+
+    // Nezobrazovat stolní kalendář a cenu dopravného a balného
+    $publications = array_filter($publications, function ($node) {
+      return $node->nid !== '303' && $node->nid !== '37001';
+    });
+
+    // For first step of form.
+    if (isset($form['progress']['#current_page']) && $form['progress']['#current_page'] == 'webform_start') {
+      if (isset($form['actions']['submit'])) {
+        $form['actions']['submit']['#access'] = FALSE;
+      }
+
+      $form['headers'] = [
+        '#type' => 'fieldset',
+        '#weight' => -2,
+      ];
+      $form['headers']['header_1'] = [
+        '#type' => 'item',
+        '#markup' => t('Název publikace'),
+      ];
+
+      $form['headers']['header_2'] = [
+        '#type' => 'item',
+        '#markup' => t('Cena vč. DPH'),
+      ];
+
+      $form['headers']['header_3'] = [
+        '#type' => 'item',
+        '#markup' => t('Počet kusů'),
+      ];
+      foreach ($publications as $node) {
+        $publication = Node::load($node->nid);
+        if ($publication->get('field_skladem')->getString() == '0') {
+          continue;
+        }
+        $price = $publication->get('field_cena')->getString();
+        $form['elements'][$node->nid] = [
+          '#type' => 'fieldset',
+          '#weight' => -1,
+        ];
+
+        $form['elements'][$node->nid]['amount_publication_' . $node->nid] = [
+          '#type' => 'item',
+          '#markup' => $publication->getTitle(),
+        ];
+
+        $form['elements'][$node->nid]['amount_price_' . $node->nid] = [
+          '#type' => 'item',
+          '#markup' => $price . ' ' . t('CZK'),
+        ];
+
+        $form['elements'][$node->nid]['amount_quantity_' . $node->nid] = [
+          '#type' => 'number',
+          '#default_value' => 0,
+          '#min' => 0,
+        ];
+      }
+      array_unshift($form['actions']['submit']['#submit'], 'webform_submission_koupit_vice_publikaci_form_submit');
+    }
+
+    // For second step of form.
+    if (isset($form['progress']['#current_page']) && $form['progress']['#current_page'] == 'webform_preview') {
+      $values = $form_state->getValues();
+      $total_price = 0;
+      $form['headers'] = [
+        '#type' => 'fieldset',
+        '#weight' => -2,
+      ];
+      $form['headers']['header_1'] = [
+        '#type' => 'item',
+        '#markup' => t('Název publikace'),
+      ];
+
+      $form['headers']['header_2'] = [
+        '#type' => 'item',
+        '#markup' => t('Cena vč. DPH'),
+      ];
+
+      $form['headers']['header_3'] = [
+        '#type' => 'item',
+        '#markup' => t('Počet kusů (košík)'),
+      ];
+      foreach ($values as $machine_name => $value) {
+        // If amount val is true print preview info.
+        if (strpos($machine_name, 'amount_quantity') !== FALSE && $value != 0) {
+          $nid = (int) filter_var($machine_name, FILTER_SANITIZE_NUMBER_INT);
+          $publication = Node::load($nid);
+          $price = $publication->get('field_cena')->getString();
+
+          $form['elements'][$nid] = [
+            '#type' => 'fieldset',
+            '#weight' => -1,
+          ];
+
+          $form['elements'][$nid]['amount_publication_' . $nid] = [
+            '#type' => 'item',
+            '#markup' => $publication->getTitle(),
+          ];
+
+          $form['elements'][$nid]['amount_price_' . $nid] = [
+            '#type' => 'item',
+            '#markup' => $price . ' ' . t('CZK'),
+          ];
+
+          $form['elements'][$nid]['amount_quantity_' . $nid] = [
+            '#type' => 'item',
+            '#markup' => $value,
+          ];
+          $to_save[] = [
+            'webform_id' => $webform_id,
+            'title' => $publication->get('title')->getString(),
+            'id' => $nid,
+            'price' => $price,
+            'quantity' => $value,
+          ];
+          $total_price += $price * $value;
+          $formattedDetails = \Drupal::service('sovak_webform.helper')
+            ->formatOrderDetails($to_save);
+          $form['elements']['objednavky']['#value'] = $formattedDetails;
+        }
+      }
+
+      $form['elements'][$nid]['total_price' . $nid] = [
+        '#type' => 'fieldset',
+        '#weight' => 9999,
+      ];
+
+      $form['elements'][$nid]['total_price']['amount_publication_total_price' . $nid] = [
+        '#type' => 'item',
+        '#title' => t('Total Price'),
+      ];
+
+      $form['elements'][$nid]['total_price']['amount_price_total_price' . $nid] = [
+        '#type' => 'item',
+        '#title' => '',
+        '#markup' => $total_price . ' ' . t('CZK (including VAT)'),
+      ];
+    }
+  }
+  elseif (strpos($form_id, 'webform_submission_koupit_publikaci') !== FALSE) {
+    $node = \Drupal::routeMatch()->getParameter('node');
+    $webform_id = $form['#webform_id'];
+    if ($node) {
+      $page = $form_state->getStorage()['current_page'];
+
+      // For first step of form.
+      if ($page == 'webform_start') {
+        array_unshift($form['actions']['submit']['#submit'], 'webform_submission_koupit_publikaci_form_submit');
+      }
+
+      // For second step of form.
+      if ($page == 'webform_preview') {
+        $values = $form_state->getValues();
+        $publication = $node;
+        $price = $publication->get('field_cena')->getString();
+
+        $form['elements'][$publication->id()]['total_price_' . $publication->id()] = [
+          '#type' => 'item',
+          '#title' => t('Výsledná cena objednávky'),
+          '#markup' => intval($values['pocet_kusu']) * $price . ' ' . t('CZK (including VAT)'),
+        ];
+        $to_save[] = [
+          'webform_id' => $webform_id,
+          'id' => $publication->id(),
+          'title' => $publication->getTitle(),
+          'price' => $price,
+          'quantity' => $values['pocet_kusu'],
+        ];
+
+        $formattedDetails = \Drupal::service('sovak_webform.helper')
+          ->formatOrderDetails($to_save);
+        $form['elements']['objednavky']['#value'] = $formattedDetails;
+      }
+    }
+  }
+}
+
+/**
+ * Custom submit handler function.
+ */
+function webform_submission_prihlasit_na_seminar_form_submit(array $form, FormStateInterface $form_state) {
+  $vals = $form_state->getValues();
+  $price = 0;
+  $number_of_participants = count($vals['name_composite']);
+  if ($vals['typ_clenstvi'] == 'radny_clen') {
+    $price = intval($vals['cena_radny']);
+  }
+  elseif ($vals['typ_clenstvi'] == 'pridruzeny_clen') {
+    $price = intval($vals['cena_pridruzeny']);
+  }
+  elseif ($vals['typ_clenstvi'] == 'Ostatni') {
+    $price = intval($vals['cena_ostatni']);
+  }
+
+  $full_price = $price * $number_of_participants;
+  $values = ['cena_celkem' => $full_price];
+  $form_state->setValues($values);
+}
+
+/**
+ * Custom submit handler function.
+ */
+function webform_submission_prihlasit_na_konferenci_form_submit(array $form, FormStateInterface $form_state) {
+  $vals = $form_state->getValues();
+  $price = 0;
+  if ($vals['typ_clenstvi'] == '1_pristup') {
+    $full_price = intval($vals['cena_1_pristup']);
+  }
+  elseif ($vals['typ_clenstvi'] == '2_pristup') {
+    $full_price = intval($vals['cena_2_pristup']);
+  }
+  elseif ($vals['typ_clenstvi'] == '3_pristup') {
+    $full_price = intval($vals['cena_3_pristup']);
+  }
+  elseif ($vals['typ_clenstvi'] == '4_pristup') {
+    $full_price = intval($vals['cena_4_pristup']);
+  }
+  elseif ($vals['typ_clenstvi'] == '5_pristup') {
+    $number_of_participants = count($vals['name_composite']);
+    if ($number_of_participants == 0) {
+      $full_price = intval($vals['cena_5_pristup']);
+    } else {
+      $priceFifth = intval($vals['cena_5_pristup']);
+      $priceOthers = intval($vals['cena_5_plus_pristup']);
+      $finalOthers = $priceOthers * $number_of_participants;
+      $full_price = $finalOthers + $priceFifth;
+    }
+  };
+  $values = ['cena_celkem' => $full_price];
+  $form_state->setValues($values);
+}
+
+/**
+ * Custom submit handler function.
+ */
+function webform_submission_koupit_vice_publikaci_form_submit(&$form, FormStateInterface $form_state) {
+  $values = $form_state->getValues();
+  $values = \Drupal::service('sovak_webform.helper')
+    ->serializeOrderValues($values, $form);
+  $form_state->setValues($values);
+}
+
+/**
+ * Custom submit handler function.
+ */
+function webform_submission_koupit_publikaci_form_submit(&$form, FormStateInterface $form_state) {
+  $node = \Drupal::routeMatch()->getParameter('node');
+  if ($node) {
+    $values = $form_state->getValues();
+    $nid = $node->id();
+    $publication = Node::load($nid);
+    $price = $publication->get('field_cena')->getString();
+
+    $form['elements'][$nid] = [
+      '#type' => 'fieldset',
+      '#title' => t('publications'),
+      '#weight' => -1,
+    ];
+
+    $form['elements'][$nid]['amount_publication_' . $nid] = [
+      '#type' => 'item',
+      '#title' => t('Name'),
+      '#markup' => $publication->getTitle(),
+    ];
+
+    $form['elements'][$nid]['amount_price_' . $nid] = [
+      '#type' => 'item',
+      '#title' => t('Price'),
+      '#markup' => $price,
+    ];
+
+    $form['elements'][$nid]['amount_quantity_' . $nid] = [
+      '#type' => 'item',
+      '#title' => t('Quantity'),
+      '#markup' => $values['pocet_kusu'],
+    ];
+    $to_save[] = [
+      'id' => $nid,
+      'price' => $price,
+      'quantity' => $values['pocet_kusu'],
+    ];
+
+    $formattedDetails = \Drupal::service('sovak_webform.helper')
+      ->formatOrderDetails($to_save);
+    $form_state->setValue('objednavky', $formattedDetails);
+  }
+}
